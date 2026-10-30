@@ -96,6 +96,80 @@ models: []
 	}
 }
 
+func TestPeerConfig_Trust(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantLocal bool
+	}{
+		{
+			name: "omitted",
+			yaml: `
+proxy: http://example.com
+models: [model_a]
+`,
+			wantLocal: false,
+		},
+		{
+			name: "remote",
+			yaml: `
+proxy: http://example.com
+trust: remote
+models: [model_a]
+`,
+			wantLocal: false,
+		},
+		{
+			name: "local",
+			yaml: `
+proxy: http://example.com
+trust: local
+models: [model_a]
+`,
+			wantLocal: true,
+		},
+		{
+			name: "local mixed case and padding",
+			yaml: `
+proxy: http://example.com
+trust: " Local "
+models: [model_a]
+`,
+			wantLocal: true,
+		},
+		{
+			name: "unknown",
+			yaml: `
+proxy: http://example.com
+trust: friend
+models: [model_a]
+`,
+			wantLocal: false,
+		},
+		{
+			name: "empty",
+			yaml: `
+proxy: http://example.com
+trust: ""
+models: [model_a]
+`,
+			wantLocal: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg PeerConfig
+			if err := yaml.Unmarshal([]byte(tt.yaml), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := cfg.TrustLocal(); got != tt.wantLocal {
+				t.Fatalf("TrustLocal() = %v, want %v (trust %q)", got, tt.wantLocal, cfg.Trust)
+			}
+		})
+	}
+}
+
 func TestPeerConfig_ProxyURL(t *testing.T) {
 	yamlData := `
 proxy: http://192.168.1.23:8080/api

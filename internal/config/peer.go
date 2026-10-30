@@ -17,12 +17,23 @@ type PeerConfig struct {
 	TailcatKey string   `yaml:"tailcatKey"`
 	Models     []string `yaml:"models"`
 	Filters    Filters  `yaml:"filters"`
+	// Trust classifies the peer for X-Local-Only routing. Only "local"
+	// (case-insensitive, surrounding space ignored) is a local target.
+	// A missing or unknown value is remote, so a typo fails closed.
+	Trust string `yaml:"trust"`
 
 	// Timeout settings for proxy connections
 	Timeouts TimeoutsConfig `yaml:"timeouts"`
 
 	tailcatBlob       string
 	tailcatPrivateKey *tailcat.PrivateKey
+}
+
+// TrustLocal reports whether this peer may serve an X-Local-Only request.
+// Models this process serves itself are always local; this method is only
+// for peers. Anything other than "local" is remote.
+func (c PeerConfig) TrustLocal() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Trust), "local")
 }
 
 // Tailcat returns the Tailcat-specific peer settings derived while validating

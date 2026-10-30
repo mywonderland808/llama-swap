@@ -3,8 +3,8 @@ title: Peers - splitting models across machines and providers
 summary: Route to another llama-swap, a remote OpenAI-compatible server, or a hosted provider under one endpoint.
 category: examples
 tags: [peers, remote, multi-host, openrouter, spillover]
-config_keys: [peers, peers.*.proxy, peers.*.models, peers.*.apiKey, peers.*.filters, peers.*.timeouts]
-updated: 2026-08-25
+config_keys: [peers, peers.*.proxy, peers.*.models, peers.*.apiKey, peers.*.filters, peers.*.timeouts, peers.*.trust]
+updated: 2026-10-30
 ---
 
 # Peers: splitting models across machines and providers
@@ -124,6 +124,10 @@ Clients request `llama` and get the cheapest target with capacity. See
 
 ## Caveats
 
+- A request with `X-Local-Only` is not sent to a peer unless that peer sets
+  `trust: local`. Omitted trust is remote. The spillover example above will
+  answer 503 once it selects a remote target, instead of calling that peer.
+  See `guides/connectivity/remote-peers`.
 - Fully qualified peer names are reserved — they are the IDs `/v1/models`
   reports.
 - Selectors are not supported on `/upstream/<model>` paths, so peer models are

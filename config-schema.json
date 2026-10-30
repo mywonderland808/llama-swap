@@ -795,6 +795,11 @@
                         },
                         "description": "A list of models served by the peer."
                     },
+                    "trust": {
+                        "type": "string",
+                        "default": "remote",
+                        "description": "local or remote. Only local may serve a request carrying the X-Local-Only header. Omit the key, or set any other value, and the peer is remote. Models this instance serves itself are always local. The header is forwarded on a peer hop so the next llama-swap applies the same rule; it is not one of the browser headers stripped before proxying."
+                    },
                     "filters": {
                         "type": "object",
                         "properties": {
