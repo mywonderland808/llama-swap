@@ -26,6 +26,10 @@ type peerMember struct {
 	transport    *http.Transport
 	tailcat      *tailcat.Client
 	apiKey       string
+	// trustLocal is true only when the peer's trust is "local". An
+	// X-Local-Only request may be proxied to that peer; every other peer
+	// is refused.
+	trustLocal bool
 }
 
 type peerRoute struct {
@@ -113,6 +117,8 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 				r.Out.Host = r.Out.URL.Host
 				// The peer is a server-to-server hop. Some APIs (Anthropic)
 				// reject requests carrying a browser Origin; see issue #1214.
+				// X-Local-Only is not in that strip list: the next llama-swap
+				// must see it and apply the same local-only gate.
 				swaputil.StripBrowserRequestHeaders(r.Out.Header)
 			},
 		}
@@ -158,6 +164,7 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 			transport:    peerTransport,
 			tailcat:      tailcatClient,
 			apiKey:       peer.ApiKey,
+			trustLocal:   peer.TrustLocal(),
 		}
 		members = append(members, pp)
 
@@ -302,6 +309,14 @@ func (r *Peer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	pp := route.member
+
+	// Fail closed. A flagged request must not reach a remote peer, including
+	// when a selector or profile already rewrote the model onto one.
+	if swaputil.LocalOnlyRequested(req.Header) && !pp.trustLocal {
+		r.logger.Warn(swaputil.LocalOnlyRejectMessage)
+		swaputil.SendResponse(w, req, http.StatusServiceUnavailable, swaputil.LocalOnlyRejectMessage)
+		return
+	}
 
 	r.logger.Debugf("peer: routing model %s to peer %s as %s", data.ModelID, pp.peerID, route.modelID)
 

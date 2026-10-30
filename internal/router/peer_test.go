@@ -1,12 +1,15 @@
 package router
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -875,5 +878,179 @@ peers:
 	}
 	if err := pr.Shutdown(time.Second); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+func TestPeer_LocalOnlyRouting(t *testing.T) {
+	const reject = "rejected: local_only, no local target available"
+
+	tests := []struct {
+		name          string
+		trust         string
+		setHeader     bool
+		headerVals    []string
+		wantCode      int
+		wantReached   bool
+		wantForwarded []string
+		wantLog       bool
+	}{
+		{
+			name:          "local trust serves and forwards the header",
+			trust:         "local",
+			setHeader:     true,
+			headerVals:    []string{"1"},
+			wantCode:      http.StatusOK,
+			wantReached:   true,
+			wantForwarded: []string{"1"},
+		},
+		{
+			name:          "empty header is forwarded to a local peer",
+			trust:         "local",
+			setHeader:     true,
+			headerVals:    []string{""},
+			wantCode:      http.StatusOK,
+			wantReached:   true,
+			wantForwarded: []string{""},
+		},
+		{
+			name:       "remote trust is rejected",
+			trust:      "remote",
+			setHeader:  true,
+			headerVals: []string{"true"},
+			wantCode:   http.StatusServiceUnavailable,
+			wantLog:    true,
+		},
+		{
+			name:       "missing trust is remote",
+			trust:      "",
+			setHeader:  true,
+			headerVals: []string{""},
+			wantCode:   http.StatusServiceUnavailable,
+			wantLog:    true,
+		},
+		{
+			name:       "unknown trust is remote",
+			trust:      "friend",
+			setHeader:  true,
+			headerVals: []string{"yes"},
+			wantCode:   http.StatusServiceUnavailable,
+			wantLog:    true,
+		},
+		{
+			name:        "unflagged request still reaches a remote peer",
+			trust:       "",
+			wantCode:    http.StatusOK,
+			wantReached: true,
+		},
+		{
+			name:          "explicit false is not local-only",
+			trust:         "remote",
+			setHeader:     true,
+			headerVals:    []string{"false"},
+			wantCode:      http.StatusOK,
+			wantReached:   true,
+			wantForwarded: []string{"false"},
+		},
+		{
+			name:          "explicit zero is not local-only",
+			trust:         "remote",
+			setHeader:     true,
+			headerVals:    []string{"0"},
+			wantCode:      http.StatusOK,
+			wantReached:   true,
+			wantForwarded: []string{"0"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var hits atomic.Int32
+			var gotHeader http.Header
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				gotHeader = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			t.Cleanup(upstream.Close)
+
+			proxyURL, err := url.Parse(upstream.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			logger := logmon.NewWriter(&logs)
+			logger.SetLogLevel(logmon.LevelWarn)
+
+			pr, err := NewPeer(config.Config{Peers: config.PeerDictionaryConfig{
+				"peer1": config.PeerConfig{
+					Proxy:    upstream.URL,
+					ProxyURL: proxyURL,
+					Models:   []string{"remote-model"},
+					Trust:    tt.trust,
+				},
+			}}, logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pr.Shutdown(time.Second) })
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "http://browser.example")
+			if tt.setHeader {
+				for _, v := range tt.headerVals {
+					req.Header.Add(swaputil.HeaderLocalOnly, v)
+				}
+			}
+			*req = *req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{
+				Model:   "remote-model",
+				ModelID: "remote-model",
+			}))
+			w := httptest.NewRecorder()
+			pr.ServeHTTP(w, req)
+
+			if w.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, tt.wantCode, w.Body.String())
+			}
+			if reached := hits.Load() > 0; reached != tt.wantReached {
+				t.Fatalf("upstream reached = %v, want %v", reached, tt.wantReached)
+			}
+			if tt.wantReached {
+				if got := gotHeader.Values("Origin"); len(got) != 0 {
+					t.Errorf("Origin = %q reached the peer; browser headers must stay stripped", got)
+				}
+				if tt.setHeader {
+					if got := gotHeader.Values(swaputil.HeaderLocalOnly); strings.Join(got, ",") != strings.Join(tt.wantForwarded, ",") {
+						t.Errorf("%s = %q, want %q", swaputil.HeaderLocalOnly, got, tt.wantForwarded)
+					}
+				} else if got := gotHeader.Values(swaputil.HeaderLocalOnly); len(got) != 0 {
+					t.Errorf("%s = %q, want it absent", swaputil.HeaderLocalOnly, got)
+				}
+			}
+			if tt.wantLog {
+				if !strings.Contains(logs.String(), reject) {
+					t.Errorf("log %q, want it to contain %q", logs.String(), reject)
+				}
+				if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+					t.Errorf("Content-Type = %q, want application/json", ct)
+				}
+				var body struct {
+					Src   string `json:"src"`
+					Error struct {
+						Message string `json:"message"`
+						Type    string `json:"type"`
+						Code    string `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+					t.Fatalf("body is not JSON: %v (%s)", err, w.Body.String())
+				}
+				if body.Src != "llama-swap" || body.Error.Message != reject || body.Error.Type != "server_error" || body.Error.Code != "service_unavailable" {
+					t.Errorf("body = %+v, want src llama-swap message %q type server_error code service_unavailable", body, reject)
+				}
+			}
+		})
 	}
 }

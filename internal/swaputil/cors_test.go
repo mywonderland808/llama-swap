@@ -67,6 +67,25 @@ func TestStripBrowserRequestHeaders(t *testing.T) {
 	}
 }
 
+// TestStripBrowserRequestHeaders_PreservesLocalOnly locks the peer-hop
+// decision: X-Local-Only is a routing constraint, not a browser header, so
+// the strip list from PR #1215 must leave it in place for the next llama-swap.
+func TestStripBrowserRequestHeaders_PreservesLocalOnly(t *testing.T) {
+	h := http.Header{}
+	h.Set(HeaderLocalOnly, "1")
+	h.Set("Origin", "http://localhost:8080")
+	h.Set("Content-Type", "application/json")
+
+	StripBrowserRequestHeaders(h)
+
+	if got := h.Values(HeaderLocalOnly); len(got) != 1 || got[0] != "1" {
+		t.Errorf("%s = %q, want it forwarded", HeaderLocalOnly, got)
+	}
+	if got := h.Values("Origin"); len(got) != 0 {
+		t.Errorf("Origin = %q, want it stripped", got)
+	}
+}
+
 func TestStripUpstreamCORSHeaders_EmptyHeader(t *testing.T) {
 	h := http.Header{}
 	StripUpstreamCORSHeaders(h)

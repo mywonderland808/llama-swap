@@ -877,6 +877,20 @@ routing:
 # - an unqualified model ID is accepted only when exactly one peer provides it
 # - local model IDs and aliases take precedence over unqualified peer model IDs
 # - fully qualified peer names are reserved and are the peer IDs shown by /v1/models
+#
+# X-Local-Only request header (not a config key):
+# - presence is enough, including an empty value, 1, or true (any case)
+# - 0 or false (any case, surrounding space ignored) means the header is not set
+# - a flagged request may only be served by a model this instance runs itself,
+#   or by a peer whose trust is local
+# - if nothing local can serve the model, the response is HTTP 503 with
+#   error.message "rejected: local_only, no local target available"
+# - the proxy log records the same line
+# - there is no fallback to a remote peer
+# - a request without the header is routed exactly as before
+# - the header is forwarded on a peer hop. Origin, Referer, and Sec-Fetch-*
+#   are stripped (PR #1215); X-Local-Only is not, so the next llama-swap
+#   enforces it against that instance's own peers
 peers:
   # keys is the peer'd ID
   llama-swap-peer:
@@ -884,6 +898,17 @@ peers:
     # - required
     # - requested path to llama-swap will be appended to the end of the proxy value
     proxy: http://192.168.1.23
+    # trust: local or remote
+    # - optional, default remote
+    # - local: this peer may serve X-Local-Only requests. Use it for another
+    #   llama-swap you run. The header is forwarded so that peer applies the
+    #   same gate to its own peers
+    # - remote: a hosted API, or any peer that must not see flagged requests
+    # - a missing, empty, or unknown value is remote. A typo fails closed
+    #   rather than treating the peer as local
+    # - models listed under the top-level models key are always local and do
+    #   not need trust
+    trust: local
     # models: a list of models served by the peer
     # - required
     models:
@@ -901,6 +926,8 @@ peers:
     models:
       - model_a
   openrouter:
+    # trust is omitted, so this peer is remote. An X-Local-Only request for
+    # one of its models is rejected with HTTP 503 and is not proxied.
     proxy: https://openrouter.ai/api
     # apiKey: a string key to be injected into the request
     # - optional, default: ""

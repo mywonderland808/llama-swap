@@ -25,6 +25,10 @@ var corsResponseHeaders = []string{
 // browserRequestHeaders are headers a browser attaches to cross-origin
 // requests. They describe the hop from the browser to llama-swap, not the hop
 // from llama-swap to an upstream.
+//
+// X-Local-Only is intentionally absent. It is a routing constraint, not a
+// browser header, and must survive the hop so the next llama-swap can refuse
+// its own remote peers. Do not add it here.
 var browserRequestHeaders = []string{
 	"Origin",
 	"Referer",

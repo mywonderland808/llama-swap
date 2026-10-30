@@ -1,12 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -612,6 +614,119 @@ func TestProxy_ConfiguredVoicesOverrideUpstream(t *testing.T) {
 
 		if w.Body.String() != "upstream" {
 			t.Errorf("body = %q, want upstream", w.Body.String())
+		}
+	})
+}
+
+func TestServer_LocalOnly_LocalModelPasses(t *testing.T) {
+	var peerHits atomic.Int32
+	peer := newStubRouter([]string{"remote-model"}, "remote-ok")
+	peer.serveHTTP = func(w http.ResponseWriter, r *http.Request) {
+		peerHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("remote-ok"))
+	}
+	local := newStubRouter([]string{"local-model"}, "local-ok")
+	s := newTestServerWithConfig(config.Config{
+		Models: map[string]config.ModelConfig{"local-model": {}},
+	}, local, peer)
+
+	for _, header := range []struct {
+		name string
+		set  bool
+		val  string
+	}{
+		{name: "flagged", set: true, val: "1"},
+		{name: "unflagged", set: false},
+	} {
+		t.Run(header.name, func(t *testing.T) {
+			peerHits.Store(0)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"local-model"}`))
+			req.Header.Set("Content-Type", "application/json")
+			if header.set {
+				req.Header.Set(swaputil.HeaderLocalOnly, header.val)
+			}
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, req)
+			if w.Code != http.StatusOK || w.Body.String() != "local-ok" {
+				t.Fatalf("status=%d body=%q, want 200 local-ok", w.Code, w.Body.String())
+			}
+			if peerHits.Load() != 0 {
+				t.Fatal("local model was sent to a peer")
+			}
+		})
+	}
+}
+
+func TestServer_LocalOnly_RemotePeer(t *testing.T) {
+	const reject = "rejected: local_only, no local target available"
+
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxyURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := logmon.NewWriter(&logs)
+	logger.SetLogLevel(logmon.LevelWarn)
+	cfg := config.Config{
+		Models: map[string]config.ModelConfig{"local-model": {}},
+		Peers: config.PeerDictionaryConfig{
+			"cloud": config.PeerConfig{
+				Proxy:    upstream.URL,
+				ProxyURL: proxyURL,
+				Models:   []string{"remote-model"},
+				Trust:    "remote",
+			},
+		},
+	}
+	peer, err := router.NewPeer(cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Shutdown(time.Second) })
+	s := newTestServerWithConfig(cfg, newStubRouter([]string{"local-model"}, "local-ok"), peer)
+
+	t.Run("flagged remote model is 503", func(t *testing.T) {
+		hits.Store(0)
+		logs.Reset()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"remote-model"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(swaputil.HeaderLocalOnly, "true")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status=%d body=%q, want 503", w.Code, w.Body.String())
+		}
+		if hits.Load() != 0 {
+			t.Fatal("remote peer was called")
+		}
+		if !strings.Contains(w.Body.String(), reject) {
+			t.Errorf("body = %s, want %q", w.Body.String(), reject)
+		}
+		if !strings.Contains(logs.String(), reject) {
+			t.Errorf("log %q, want %q", logs.String(), reject)
+		}
+	})
+
+	t.Run("unflagged remote model is unchanged", func(t *testing.T) {
+		hits.Store(0)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"remote-model"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"ok":true`) {
+			t.Fatalf("status=%d body=%q, want 200 from the peer", w.Code, w.Body.String())
+		}
+		if hits.Load() != 1 {
+			t.Fatalf("upstream hits = %d, want 1", hits.Load())
 		}
 	})
 }
